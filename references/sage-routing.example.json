@@ -1,0 +1,31 @@
+{
+  "preflight": {
+    "enabled": true,
+    "budget_tokens": 800,
+    "threshold": "auto",
+    "fallback_to_heuristic": true,
+    "providers": [
+      {
+        "id": "cheap-a",
+        "provider": "generic-openai-compat",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "SAGE_PREFLIGHT_BASE_URL",
+        "api_key_env": "SAGE_PREFLIGHT_API_KEY",
+        "cost_per_1k_in": 0.01,
+        "cost_per_1k_out": 0.02,
+        "timeout_ms": 8000
+      },
+      {
+        "id": "cheap-b",
+        "provider": "generic-openai-compat",
+        "model": "glm-5.3-flash",
+        "base_url_env": "GLM_BASE_URL",
+        "api_key_env": "GLM_API_KEY",
+        "cost_per_1k_in": 0.005,
+        "cost_per_1k_out": 0.015,
+        "timeout_ms": 8000
+      }
+    ],
+    "selection": "cheapest-first"
+  }
+}
