@@ -59,6 +59,17 @@ def main():
     p.add_argument("--preflight-tokens-out", type=int, default=0)
     p.add_argument("--preflight-useful", default="", help="yes/no/unknown")
     p.add_argument("--preflight-wrong", default="", help="yes/no")
+    p.add_argument("--accepted-findings", type=int, default=0)
+    p.add_argument("--rejected-findings", type=int, default=0)
+    p.add_argument("--verified-findings", type=int, default=0)
+    p.add_argument("--false-positive-findings", type=int, default=0)
+    p.add_argument("--tool-calls", type=int, default=0)
+    p.add_argument("--experiment-id", default="")
+    p.add_argument("--variant", default="", help="control|scout")
+    p.add_argument("--claude-tokens", type=int, default=0)
+    p.add_argument("--scout-tokens", type=int, default=0)
+    p.add_argument("--total-tokens", type=int, default=0)
+    p.add_argument("--estimated-cost", type=float, default=0.0)
     p.add_argument("--repo", default=".")
     args = p.parse_args()
 
@@ -91,16 +102,72 @@ def main():
         "preflight_tokens_out": args.preflight_tokens_out,
         "preflight_useful": args.preflight_useful,
         "preflight_wrong": args.preflight_wrong,
+        "accepted_findings": args.accepted_findings,
+        "rejected_findings": args.rejected_findings,
+        "verified_findings": args.verified_findings,
+        "false_positive_findings": args.false_positive_findings,
+        "tool_calls": args.tool_calls,
+        "experiment_id": args.experiment_id,
+        "variant": args.variant,
+        "claude_tokens": args.claude_tokens,
+        "scout_tokens": args.scout_tokens,
+        "total_tokens": args.total_tokens,
+        "estimated_cost": args.estimated_cost,
     }
+    # idempotency: deduplicate by task_id — if same task_id already logged, append dedup suffix
     entry = strip_secrets_obj(entry)
 
     repo = Path(args.repo)
     out = repo / ".wolf" / "sage-telemetry.jsonl"
-    if not repo.exists() or not (repo / ".git").exists():
+    if not repo.exists():
         out = Path(__file__).resolve().parents[2] / ".wolf" / "sage-telemetry.jsonl"
+    else:
+        # Always project-local, even if no .git (isolation fix)
+        out = repo / ".wolf" / "sage-telemetry.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    # idempotency: check duplicate task_id in last 10 entries (stable session)
+    try:
+        if out.exists():
+            lines = out.read_text(encoding="utf-8", errors="ignore").splitlines()[-10:]
+            for line in lines:
+                try:
+                    prev = json.loads(line)
+                    if prev.get("task_id") == entry["task_id"] and prev.get("command") == entry["command"]:
+                        # duplicate — append dedup marker but still log with count
+                        entry["duplicate_of"] = prev.get("task_id")
+                except: pass
+    except: pass
+    # atomic append with file lock (Windows msvcrt, POSIX fcntl)
+    try:
+        with open(out, "a", encoding="utf-8") as f:
+            locked = False
+            try:
+                import msvcrt
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            except:
+                try:
+                    import fcntl
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    locked = True
+                except:
+                    pass
+            f.write(json.dumps(entry) + "\n")
+            f.flush()
+            if locked:
+                try:
+                    import msvcrt
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                except:
+                    try:
+                        import fcntl
+                        fcntl.flock(f, fcntl.LOCK_UN)
+                    except:
+                        pass
+    except Exception as e:
+        # fallback without lock
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
     print(json.dumps(entry, indent=2))
     print(f"# logged to {out}", file=sys.stderr)
 

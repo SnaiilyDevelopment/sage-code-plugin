@@ -10,6 +10,9 @@ PATTERNS = [
     (re.compile(r"license\.dat[^\\n]*", re.I), "license.dat [REDACTED]"),
     (re.compile(r"hwid\.dat[^\\n]*", re.I), "hwid.dat [REDACTED]"),
     (re.compile(r"audit_signing\.key[^\\n]*", re.I), "audit_signing.key [REDACTED]"),
+    (re.compile(r"sk-[A-Za-z0-9\-_]{20,}", re.I), "[REDACTED sk-...]"),
+    (re.compile(r"ghp_[A-Za-z0-9]{30,}", re.I), "[REDACTED ghp_]"),
+    (re.compile(r"-----BEGIN (PRIVATE|RSA) KEY-----", re.I), "[REDACTED PRIVATE KEY]"),
 ]
 
 def strip(text: str) -> str:

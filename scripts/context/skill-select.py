@@ -26,6 +26,35 @@ ALIAS_MAP = {
 
 BUDGET_TOKENS = 3500  # total skill budget excluding sage-core
 
+def _load_threshold() -> float:
+    try:
+        from pathlib import Path
+        import importlib.util as _ilu
+        pp = Path(__file__).resolve().parents[1] / "policy/policy.py"
+        spec = _ilu.spec_from_file_location("pol_thr", str(pp))
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        pol = mod.load(Path.cwd())
+        return float(pol.get("skill_threshold", 2.0))
+    except:
+        return 2.0
+
+def _detect_tech(task: str, files: list, categories: list) -> dict:
+    text = (task + " " + " ".join(files) + " " + " ".join(categories)).lower()
+    tech = {}
+    if "registry" in text or "hkcu" in text or "hklm" in text:
+        tech["windows"] = True
+    if "tauri" in text or "cargo" in text or "rust" in text:
+        tech["tauri"] = True
+    # also probe repo structure if available
+    try:
+        from pathlib import Path as _P
+        root = _P.cwd()
+        if (_P(root / "src-tauri" / "Cargo.toml").exists() or _P(root / "tauri.conf.json").exists()):
+            tech["tauri"] = True
+    except: pass
+    return tech
+
 def score_skill(skill_path: str, task: str, categories: list, files: list) -> float:
     info = SKILLS.get(skill_path)
     if not info or info.get("always"):
@@ -49,9 +78,26 @@ def score_skill(skill_path: str, task: str, categories: list, files: list) -> fl
     for cat in categories:
         if cat.lower() in [c.lower() for c in cat_map.get(skill_path,[])]:
             score += 3
+    # tech detection bonus (e.g., registry+tauri+rust+security)
+    tech = _detect_tech(task, files, categories)
+    if skill_path == "skills/sage-windows/SKILL.md" and tech.get("windows"):
+        score += 2
+    if skill_path == "skills/sage-tauri/SKILL.md" and tech.get("tauri"):
+        score += 2
+    # risk-aware: security high value
+    if skill_path == "skills/security/SKILL.md" and ("security" in text or "privilege" in text or "elevation" in text):
+        score += 1
+    # repo structure bonus: if file path suggests windows
+    for f in files:
+        if "registry" in f.lower() and skill_path == "skills/sage-windows/SKILL.md":
+            score += 1
+        if "tauri" in f.lower() or f.endswith(".rs") and skill_path == "skills/sage-tauri/SKILL.md":
+            score += 1
     return score
 
-def select(task: str, categories: list, files: list, budget: int = BUDGET_TOKENS, threshold: float = 2.0) -> list:
+def select(task: str, categories: list, files: list, budget: int = BUDGET_TOKENS, threshold: float = None) -> list:
+    if threshold is None:
+        threshold = _load_threshold()
     # Always include sage-core
     selected = ["skills/sage-core/SKILL.md"]
     budget_remaining = budget
