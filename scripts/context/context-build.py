@@ -59,12 +59,23 @@ def _load_policy_budget(repo: Path) -> int:
 
 def build(task: str, categories: list[str], files: list[str], skill_hint: str = "", tool_output: str = "", prior_state: str = "", budget_tokens: int = None, repo: Path = None) -> dict:
     repo = repo or Path.cwd()
+    # single policy load, cached
+    policy_budget = _load_policy_budget(repo)
     if budget_tokens is None:
-        budget_tokens = _load_policy_budget(repo)
-    # clamp to policy max if caller tries to exceed
-    policy_max = _load_policy_budget(repo)
-    if budget_tokens > policy_max:
-        budget_tokens = policy_max
+        budget_tokens = policy_budget
+    if budget_tokens > policy_budget:
+        budget_tokens = policy_budget
+    # also load skill budget once
+    try:
+        import importlib.util as _ilu
+        pp = Path(__file__).resolve().parents[1] / "policy/policy.py"
+        spec = _ilu.spec_from_file_location("pol_cached", str(pp))
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        pol_cached = mod.load(repo)
+        skill_budget_policy = int(pol_cached.get("skill_budget", 3500))
+    except (OSError, ValueError, TypeError, ImportError):
+        skill_budget_policy = 3500
 
     tracker = BudgetTracker(budget_tokens)
     layers = {}
@@ -129,19 +140,8 @@ def build(task: str, categories: list[str], files: list[str], skill_hint: str = 
         # small cost, still track
         tracker.force_use("3_relevant_files", json.dumps(layers["3_relevant_files"]), 3)
 
-    # L4 skills
+    # L4 skills — reuse cached policy
     remaining = tracker.remaining()
-    # skill budget is min(remaining, policy skill_budget) but at least try sage-core
-    try:
-        import importlib.util as _ilu2
-        pp2 = Path(__file__).resolve().parents[1] / "policy/policy.py"
-        spec2 = _ilu2.spec_from_file_location("pol2", str(pp2))
-        mod2 = _ilu2.module_from_spec(spec2)
-        spec2.loader.exec_module(mod2)
-        pol2 = mod2.load(repo)
-        skill_budget_policy = int(pol2.get("skill_budget", 3500))
-    except:
-        skill_budget_policy = 3500
     skill_budget = min(skill_budget_policy, max(800, remaining))
     if remaining < 800:
         # still include sage-core if possible, else omit

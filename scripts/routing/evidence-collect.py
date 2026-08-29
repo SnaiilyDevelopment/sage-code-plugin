@@ -89,36 +89,42 @@ def collect(task: str, categories: list, files: list, repo: Path, max_chars: int
             for h in hits[:2]:
                 located.append(h)
 
-    # 2) symbol discovery based on task keywords
-    task_kw = re.findall(r"[A-Za-z]{4,}", task)[:6]
+    # 2) symbol discovery based on task keywords — deduped and capped to avoid 17 rg spawns
+    task_kw = list(dict.fromkeys(re.findall(r"[A-Za-z]{4,}", task.lower())))[:4]
+    # cap total rg calls
+    rg_budget = 6
     for kw in task_kw:
+        if rg_budget <=0 or len(parts) >= 8: break
+        # skip very common words
+        if kw in ("task","with","from","that","this","have","will"): continue
         hits = _rg_search(re.escape(kw), repo)
-        for h in hits[:3]:
+        rg_budget -= 1
+        for h in hits[:2]:
             key = f"{h['file']}:{h['line']}"
             if key not in seen:
                 seen.add(key)
                 located.append(h)
-                # fetch snippet around hit
                 try:
                     fp = repo / h["file"]
                     if _validate_path(repo, h["file"]) and fp.exists():
                         lines = fp.read_text(encoding="utf-8", errors="ignore").splitlines()
                         ln = int(h["line"])
                         ctx = "\n".join(lines[max(0,ln-3):ln+3])
-                        # sanitize
                         ctx = "\n".join([f"> {l[:140]}" if INJECTION_RE.match(l) else l[:140] for l in ctx.splitlines()])
                         parts.append(f"<untrusted_evidence source=\"{h['file']}:{h['line']}\" symbol=\"{kw}\">\n{ctx[:500]}\n</untrusted_evidence>")
                 except (OSError, ValueError, IndexError): pass
-        if len(parts) >= 8: break
+        # early bound check: if already near max_chars, stop
+        if sum(len(p) for p in parts) > max_chars * 0.8:
+            break
 
-    # 3) related tests
-    for test_pat in ["*test*.ts", "*test*.js", "*spec*.ts", "test_*.py", "*_test.rs"]:
-        hits = _rg_search(task_kw[0] if task_kw else "test", repo, test_pat)
+    # 3) related tests — only 1 rg call with first kw, not 5
+    if rg_budget >0 and task_kw:
+        hits = _rg_search(re.escape(task_kw[0]), repo, "*test*")
+        rg_budget -= 1
         for h in hits[:2]:
             if h["file"] not in seen:
                 parts.append(f"<untrusted_evidence source=\"{h['file']}\" kind=\"related_test\">{h['text'][:300]}</untrusted_evidence>")
                 seen.add(h["file"])
-        if len(parts) >= 10: break
 
     # 4) relevant configuration (only if task mentions config-like)
     if any(x in task.lower() for x in ["tauri", "config", "cargo", "package", "capability"]):

@@ -2,20 +2,30 @@
 """Token estimation and cost accounting — conservative, no silent fake pricing."""
 import json
 
-# Conservative estimator: len//4 * 1.25, floor 1, fallback to tiktoken if available
+# Cache tiktoken encoding (cold start ~50ms)
+_ENC = None
+def _get_enc():
+    global _ENC
+    if _ENC is not None:
+        return _ENC
+    try:
+        import tiktoken
+        _ENC = tiktoken.get_encoding("cl100k_base")
+        return _ENC
+    except (ImportError, OSError, ValueError):
+        return None
+
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    # try tiktoken if installed
-    try:
-        import tiktoken
-        # use cl100k base as generic; provider models vary but conservative
-        enc = tiktoken.get_encoding("cl100k_base")
-        c = len(enc.encode(text))
-        # stay conservative: add 10% headroom
-        return max(1, int(c * 1.1))
-    except:
-        return max(1, int(len(text) / 4 * 1.25))
+    enc = _get_enc()
+    if enc is not None:
+        try:
+            c = len(enc.encode(text))
+            return max(1, int(c * 1.1))
+        except (ValueError, TypeError, OSError):
+            pass
+    return max(1, int(len(text) / 4 * 1.25))
 
 def estimate_tokens_obj(obj) -> int:
     return estimate_tokens(json.dumps(obj, ensure_ascii=False))

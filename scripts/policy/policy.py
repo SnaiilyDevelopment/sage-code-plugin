@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 DEFAULT_POLICY = {
-    "version": "2.3",
+    "version": "2.4",
     "risk_thresholds": {"low": [0,24], "medium": [25,49], "high": [50,74], "critical": [75,100]},
     "specialist_threshold": 3,
     "skill_threshold": 2.0,
