@@ -12,7 +12,10 @@ def run_workload(cmd: str, repeats: int = 5) -> dict:
     for i in range(repeats):
         start = time.time()
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+            import shlex
+            # avoid shell=True injection for user-supplied cmd; use shlex split on Windows compatible
+            args = shlex.split(cmd, posix=False) if isinstance(cmd, str) else cmd
+            r = subprocess.run(args, shell=False, capture_output=True, text=True, timeout=120)
             elapsed = time.time() - start
             # try to parse numeric metric from stdout (e.g., diskspd MB/s or presentmon fps)
             metric = None
@@ -33,8 +36,8 @@ def run_workload(cmd: str, repeats: int = 5) -> dict:
             else:
                 samples.append(elapsed)
             print(f"  sample {i+1}: {samples[-1]:.4f} (exit {r.returncode})")
-        except Exception as e:
-            print(f"  sample {i+1} failed: {e}")
+        except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+            print(f"  sample {i+1} failed: {type(e).__name__}: {e}")
             samples.append(None)
     valid = [s for s in samples if s is not None]
     if not valid:

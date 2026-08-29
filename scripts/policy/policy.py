@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 DEFAULT_POLICY = {
-    "version": "2.2",
+    "version": "2.3",
     "risk_thresholds": {"low": [0,24], "medium": [25,49], "high": [50,74], "critical": [75,100]},
     "specialist_threshold": 3,
     "skill_threshold": 2.0,
@@ -25,18 +25,17 @@ DEFAULT_POLICY = {
     "safety": {"never_weaken": ["security","destructive","secret"], "mcp_high_risk_confirm": True},
     "preflight": {
         "enabled": True,
-        "budget_tokens": 800,
         "max_input_tokens": 2000,
         "max_output_tokens": 800,
-        "max_total_tokens": 2800,
+        "max_total_tokens": 3200,
         "max_cost_usd": 0.05,
         "timeout_ms": 8000,
         "threshold": "auto",
         "fallback_to_heuristic": True,
         "selection": "cheapest-first",
         "providers": [
-            {"id":"cheap-a","provider":"generic-openai-compat","model":"deepseek-v4-flash","base_url_env":"SAGE_PREFLIGHT_BASE_URL","api_key_env":"SAGE_PREFLIGHT_API_KEY","cost_per_1k_in":0.01,"cost_per_1k_out":0.02,"timeout_ms":8000,"currency":"USD","effective_date":"2026-01-01","source":"https://api.deepseek.com/pricing verified 2026-01"},
-            {"id":"cheap-b","provider":"generic-openai-compat","model":"glm-5.3-flash","base_url_env":"GLM_BASE_URL","api_key_env":"GLM_API_KEY","cost_per_1k_in":0.005,"cost_per_1k_out":0.015,"timeout_ms":8000,"currency":"USD","effective_date":"2026-01-01","source":"https://open.bigmodel.cn/pricing verified 2026-01"}
+            {"id":"cheap-a","provider":"generic-openai-compat","model":"deepseek-v4-flash","base_url_env":"SAGE_PREFLIGHT_BASE_URL","api_key_env":"SAGE_PREFLIGHT_API_KEY","cost_per_1k_in":0.01,"cost_per_1k_out":0.02,"timeout_ms":8000,"currency":"USD","effective_date":"2026-08-01","verified_at":"2026-08-15","source":"https://api.deepseek.com/pricing verified 2026-08"},
+            {"id":"cheap-b","provider":"generic-openai-compat","model":"glm-5.3-flash","base_url_env":"GLM_BASE_URL","api_key_env":"GLM_API_KEY","cost_per_1k_in":0.005,"cost_per_1k_out":0.015,"timeout_ms":8000,"currency":"USD","effective_date":"2026-08-01","verified_at":"2026-08-15","source":"https://open.bigmodel.cn/pricing verified 2026-08"}
         ]
     },
     "history": []
@@ -67,24 +66,29 @@ SAFETY_BLOCK_PATTERNS = [
 ]
 
 def _atomic_write_json(path: Path, obj: dict):
+    try:
+        from scripts.utils.atomic import atomic_write_json as _shared
+        _shared(path, obj)
+        return
+    except (ImportError, OSError): pass
     import os, tempfile, json as _j
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
             bak = path.with_suffix(path.suffix + ".bak")
             bak.write_text(path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-        except: pass
+        except (OSError, UnicodeError): pass
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="."+path.name+".tmp.")
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(_j.dumps(obj, indent=2))
             f.flush()
             try: os.fsync(f.fileno())
-            except: pass
+            except (OSError, AttributeError): pass
         os.replace(tmp, str(path))
-    except:
+    except (OSError, IOError):
         try: os.unlink(tmp)
-        except: pass
+        except (OSError, FileNotFoundError): pass
         raise
 
 def resolve(repo: Path) -> Path:
@@ -97,14 +101,17 @@ def snapshot_path(repo: Path, version: str) -> Path:
     return resolve(repo).parent / "sage-policy.snapshots" / f"{version}.json"
 
 def _migrate(policy: dict) -> dict:
-    # migrate old budget_tokens to new granular fields
     pre = policy.get("preflight", {})
-    if "budget_tokens" in pre and "max_total_tokens" not in pre:
-        pre["max_total_tokens"] = pre["budget_tokens"]
+    # deprecate ambiguous budget_tokens
+    if "budget_tokens" in pre:
+        # keep for warning but remove from effective policy
+        pre["_deprecated_budget_tokens"] = pre.pop("budget_tokens")
     if "max_input_tokens" not in pre:
-        pre["max_input_tokens"] = 600
+        pre["max_input_tokens"] = 2000
     if "max_output_tokens" not in pre:
         pre["max_output_tokens"] = 800
+    if "max_total_tokens" not in pre:
+        pre["max_total_tokens"] = 2800
     if "max_cost_usd" not in pre:
         pre["max_cost_usd"] = 0.05
     if "timeout_ms" not in pre:
@@ -113,7 +120,13 @@ def _migrate(policy: dict) -> dict:
     for prov in pre.get("providers",[]):
         prov.setdefault("currency","USD")
         prov.setdefault("effective_date","2026-01-01")
+        prov.setdefault("verified_at", prov.get("effective_date"))
         prov.setdefault("source","unknown — verify pricing")
+    # enforce invariant max_total >= max_input + max_output + overhead(200)
+    try:
+        if pre.get("max_total_tokens", 2800) < pre.get("max_input_tokens",2000) + pre.get("max_output_tokens",800) + 200:
+            pre["_budget_warning"] = f"max_total {pre['max_total_tokens']} < max_input {pre['max_input_tokens']}+max_output {pre['max_output_tokens']}+200"
+    except (TypeError, KeyError): pass
     return policy
 
 def load(repo: Path) -> dict:
@@ -200,6 +213,20 @@ def apply_structured(repo: Path, path: str, new_value, reason: str, evidence: st
         return {"error": f"Value {new_value} below min {spec['min']} for {path}", "error_type": "POLICY_ERROR"}
     if "max" in spec and new_value > spec["max"]:
         return {"error": f"Value {new_value} above max {spec['max']} for {path}", "error_type": "POLICY_ERROR"}
+    # budget invariant
+    if path in ("preflight.max_input_tokens","preflight.max_output_tokens","preflight.max_total_tokens"):
+        tmp = json.loads(json.dumps(load(repo)))
+        _set_nested(tmp, path, new_value)
+        pre = tmp.get("preflight",{})
+        try:
+            if pre.get("max_total_tokens",2800) < pre.get("max_input_tokens",2000)+pre.get("max_output_tokens",800)+200:
+                return {"error": f"Budget invariant violated: max_total {pre['max_total_tokens']} must be >= max_input {pre['max_input_tokens']}+max_output {pre['max_output_tokens']}+200", "error_type": "POLICY_ERROR"}
+        except (TypeError, KeyError) as e:
+            return {"error": f"Budget check failed: {e}", "error_type": "POLICY_ERROR"}
+    # idempotency: no change
+    existing_val, exists = _get_nested(load(repo), path)
+    if exists and existing_val == new_value:
+        return {"applied": False, "idempotent": True, "path": path, "value": new_value, "reason": "already at desired value"}
     # safety check
     change_desc = f"{path} -> {new_value} ({reason})"
     if any(re.search(pat, change_desc.lower()) for pat in SAFETY_BLOCK_PATTERNS):

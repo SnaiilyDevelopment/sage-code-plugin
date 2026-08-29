@@ -1,6 +1,6 @@
 {
   "name": "sage-code",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "SageTweaks-focused Claude Code engineering layer: orchestrated routing, risk engine, Windows/Tauri expertise, deterministic verification, and safe tool governance.",
   "author": {
     "name": "SageTweaks"

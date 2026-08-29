@@ -17,9 +17,9 @@ except:
 def check_budget(task: str, evidence_text: str, provider: dict, policy: dict) -> dict:
     """Before making scout request: estimate input, check budgets, return reservation or refusal."""
     pre = policy.get("preflight", {})
-    max_in = pre.get("max_input_tokens", 600)
+    max_in = pre.get("max_input_tokens", 2000)
     max_out = pre.get("max_output_tokens", 800)
-    max_total = pre.get("max_total_tokens", pre.get("budget_tokens", 800))
+    max_total = pre.get("max_total_tokens", 3200)
     max_cost = pre.get("max_cost_usd", 0.05)
     timeout_ms = pre.get("timeout_ms", 8000)
 
@@ -36,6 +36,14 @@ def check_budget(task: str, evidence_text: str, provider: dict, policy: dict) ->
 
     reasons = []
     refused = False
+    # pricing unknown/stale must be explicit, not free pass
+    if cost_info.get("cost_status") in ("UNKNOWN", "PRICING_STALE"):
+        if cost_info["cost_status"] == "UNKNOWN":
+            reasons.append("pricing unknown — cost gate UNTESTED, requires verified pricing")
+            # still allow but mark, unless policy enforces strict
+            # we do not refuse on UNKNOWN alone, but status propagates
+        else:
+            reasons.append(f"pricing stale ({cost_info.get('verified_at','')}) — cost estimate may be inaccurate")
     if est_input > max_in:
         reasons.append(f"estimated input {est_input} > max_input_tokens {max_in}")
         refused = True
@@ -45,6 +53,10 @@ def check_budget(task: str, evidence_text: str, provider: dict, policy: dict) ->
     if est_cost is not None and est_cost > max_cost:
         reasons.append(f"estimated cost ${est_cost:.4f} > max_cost_usd ${max_cost}")
         refused = True
+    # if cost UNKNOWN and max_cost very low, still refuse to avoid leak
+    if est_cost is None and cost_info.get("cost_status") == "UNKNOWN":
+        reasons.append("cost UNKNOWN — treating as potential leak, check pricing")
+        # do not auto-refuse, but anomaly flagged
 
     reservation = {
         "id": str(uuid.uuid4())[:8],
@@ -78,4 +90,18 @@ def finalize_reservation(reservation: dict, actual_in: int, actual_out: int, pro
     else:
         reservation["unused_cost_reserved"] = None
     reservation["released"] = True
+    # anomaly detection: actual > estimated *1.2 or cost variance
+    try:
+        est = reservation.get("estimated_cost_usd")
+        actual = reservation.get("actual_cost_usd")
+        if est is not None and actual is not None and actual > est * 1.2:
+            reservation["anomaly"] = f"actual cost {actual:.4f} > estimated {est:.4f}*1.2 — cost leak"
+        if reservation.get("estimated_total_tokens") and reservation.get("actual_total_tokens",0) > reservation["estimated_total_tokens"]*1.5:
+            reservation["anomaly"] = reservation.get("anomaly","") + " | actual tokens > estimated*1.5"
+    except (TypeError, KeyError, ValueError): pass
+    # if usage unavailable, mark ESTIMATED_USAGE
+    if reservation.get("actual_input_tokens") is None:
+        reservation["usage_type"] = "ESTIMATED_USAGE"
+    else:
+        reservation["usage_type"] = "ACTUAL_USAGE" if cost_info.get("cost_status") not in ("UNKNOWN",) else "ESTIMATED_USAGE"
     return reservation

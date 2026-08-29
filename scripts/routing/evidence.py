@@ -3,75 +3,100 @@
 Compact evidence pack — converts scout output into Claude-consumable pack with provenance.
 Statuses: VERIFIED (only via mark_verified), STRONG_EVIDENCE, OBSERVATION, HYPOTHESIS, UNKNOWN.
 """
-import json, re
+import json, re, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 
 STATUSES = ["VERIFIED","STRONG_EVIDENCE","OBSERVATION","HYPOTHESIS","UNKNOWN"]
 BUDGET_TOKENS = 800
+INJECTION_PATTERNS = [r"ignore\s+previous\s+instructions", r"disable\s+security", r"run\s+this\s+command", r"upload\s+secrets", r"change\s+the\s+policy", r"ignore\s+safety\s+rules"]
 
 def estimate_tokens(obj) -> int:
     try:
         from scripts.routing.tokens import estimate_tokens as _est, estimate_tokens_obj as _esto
         return _esto(obj)
-    except:
+    except (ImportError, OSError, ValueError, TypeError):
         return max(1, int(len(json.dumps(obj)) / 4 * 1.25))
+
+def _contains_injection(text: str) -> bool:
+    return any(re.search(pat, text, re.I) for pat in INJECTION_PATTERNS)
 
 def _check_fabricated(files: list, repo: Path) -> list:
     """Check if files exist in repo; return list of booleans fabricated flags."""
     out = []
     for f in files:
-        # strip line number :42
         base = f.split(":")[0].strip()
         if not base:
             out.append(True); continue
-        # path traversal check
-        if ".." in base or base.startswith("/") or base.startswith("\\"):
+        # path traversal check including absolute/win paths
+        if ".." in base or base.startswith("/") or base.startswith("\\") or re.match(r"^[A-Za-z]:", base) or base.startswith("\\\\"):
             out.append(True); continue
-        p = repo / base
-        # also check via git ls-files for tracked files
-        exists = p.exists()
-        out.append(not exists)
+        try:
+            p = (repo / base).resolve()
+            r = repo.resolve()
+            if not p.is_relative_to(r):
+                out.append(True); continue
+            exists = p.exists()
+            out.append(not exists)
+        except (OSError, ValueError, RuntimeError):
+            out.append(True)
     return out
 
 def build_pack(task: str, scout_result: dict, relevant_files: list = None, budget: int = BUDGET_TOKENS, repo: str = ".", research_sources: list = None) -> dict:
-    findings = scout_result.get("findings", []) if scout_result else []
+    # validate scout_result schema
+    if not isinstance(scout_result, dict):
+        scout_result = {"findings": [], "model": "unknown", "error": "malformed scout_result"}
+    findings = scout_result.get("findings", []) if isinstance(scout_result.get("findings"), list) else []
     repo_path = Path(repo)
     normed = []
+    seen_claims = set()
     for f in findings[:6]:
-        raw_status = f.get("status","UNKNOWN").upper()
-        # Scout can NEVER mark VERIFIED — downgrade
+        if not isinstance(f, dict):
+            continue
+        raw_status = str(f.get("status","UNKNOWN")).upper()
         downgraded = False
         if raw_status == "VERIFIED":
             raw_status = "STRONG_EVIDENCE"
             downgraded = True
         if raw_status not in STATUSES:
             raw_status = "OBSERVATION"
-        files = (f.get("files") or [])[:3]
-        # Fabricated path check
+        files = (f.get("files") or [])[:3] if isinstance(f.get("files"), list) else []
         fabricated_flags = _check_fabricated(files, repo_path) if files else []
         status = raw_status
         if any(fabricated_flags):
             status = "UNKNOWN"
-        # separate confidence from verification
         try:
             conf = round(float(f.get("confidence", 0.5)), 2)
             conf = max(0.0, min(1.0, conf))
-        except:
+        except (ValueError, TypeError):
             conf = 0.5
+        claim = str(f.get("claim",""))[:300]
+        evidence_txt = str(f.get("evidence",""))[:500]
+        # prompt-injection check on scout output
+        injection_found = _contains_injection(claim + " " + evidence_txt)
+        if injection_found:
+            claim = "[FILTERED prompt injection] " + claim[:240]
+            evidence_txt = "[FILTERED] " + evidence_txt[:400]
+            status = "UNKNOWN"
+        # deduplicate by claim hash
+        claim_hash = hashlib.sha256(claim.encode()).hexdigest()[:12]
+        if claim_hash in seen_claims:
+            continue
+        seen_claims.add(claim_hash)
         entry = {
-            "claim": f.get("claim","")[:300],
+            "claim": claim,
             "status": status,
-            "verification_status": "UNVERIFIED" if status != "VERIFIED" else "VERIFIED",
+            "verification_status": "UNVERIFIED",
             "verification_source": "none",
             "verification_evidence": "",
+            "verification_time": "",
             "files": files,
-            "evidence": f.get("evidence","")[:500],
+            "evidence": evidence_txt,
             "confidence": conf,
-            "source": f.get("source","scout:" + scout_result.get("model","unknown")),
-            "model": scout_result.get("model","unknown"),
+            "source": str(f.get("source","scout:" + str(scout_result.get("model","unknown"))))[:200],
+            "model": str(scout_result.get("model","unknown"))[:100],
             "verified": False,
-            "cost_status": scout_result.get("cost_status","UNKNOWN"),
+            "cost_status": str(scout_result.get("cost_status","UNKNOWN"))[:20],
         }
         if downgraded:
             entry["downgraded_from_verified"] = True
@@ -79,6 +104,8 @@ def build_pack(task: str, scout_result: dict, relevant_files: list = None, budge
         if any(fabricated_flags):
             entry["fabricated"] = True
             entry["fabrication_detail"] = "One or more file paths not found in repo — downgraded to UNKNOWN"
+        if injection_found:
+            entry["injection_filtered"] = True
         normed.append(entry)
 
     rel = list(dict.fromkeys(relevant_files or []))[:5]
@@ -161,34 +188,37 @@ def mark_verified(pack: dict, claim_idx: int, verified: bool, evidence: str = ""
     if not (0 <= claim_idx < len(pack.get("findings",[]))):
         return pack
     f = pack["findings"][claim_idx]
+    now = datetime.now(timezone.utc).isoformat()
     if verified:
-        # Only allow VERIFIED if source is claude/deterministic and evidence present
         if source not in ("claude","deterministic"):
             f["verification_status"] = "STRONG_EVIDENCE"
             f["verified"] = False
             f["verification_source"] = source
             f["verification_evidence"] = evidence[:500] + " [rejected: source must be claude/deterministic for VERIFIED]"
+            f["verification_time"] = now
             return pack
         if not evidence or len(evidence.strip()) < 5:
             f["verification_status"] = "STRONG_EVIDENCE"
             f["verified"] = False
             f["verification_source"] = source
             f["verification_evidence"] = "[rejected: VERIFIED requires evidence]"
+            f["verification_time"] = now
             return pack
         f["verified"] = True
         f["status"] = "VERIFIED"
         f["verification_status"] = "VERIFIED"
         f["verification_source"] = source
         f["verification_evidence"] = evidence[:500]
+        f["verification_time"] = now
     else:
         f["verified"] = False
         if f.get("status") == "VERIFIED":
             f["status"] = "STRONG_EVIDENCE"
             f["verification_status"] = "STRONG_EVIDENCE"
         f["verification_evidence"] = evidence[:500] if evidence else f.get("verification_evidence","")
+        f["verification_time"] = now
         if source:
             f["verification_source"] = source
-    # enforce invariant: status VERIFIED => verified true
     if f["status"] == "VERIFIED" and not f["verified"]:
         f["status"] = "STRONG_EVIDENCE"
     return pack

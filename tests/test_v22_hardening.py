@@ -52,9 +52,13 @@ def test_pricing_unknown():
     ci = mod.calc_cost(100,100,prov)
     assert_eq(ci["cost_status"], "UNKNOWN", "pricing unknown")
     assert ci["cost_usd"] is None
-    prov2 = {"cost_per_1k_in":0.01,"cost_per_1k_out":0.02,"source":"url","effective_date":"2026-01-01"}
+    prov2 = {"cost_per_1k_in":0.01,"cost_per_1k_out":0.02,"source":"url","effective_date":"2026-08-20","verified_at":"2026-08-20"}
     ci2 = mod.calc_cost(100,100,prov2)
     assert ci2["cost_usd"] is not None
+    # stale check
+    prov_stale = {"cost_per_1k_in":0.01,"cost_per_1k_out":0.02,"source":"url","effective_date":"2025-01-01","verified_at":"2025-01-01"}
+    ci3 = mod.calc_cost(100,100,prov_stale)
+    assert_eq(ci3["cost_status"], "PRICING_STALE", "stale pricing")
     print("PASS pricing unknown")
 
 def test_provider_sorting():
@@ -126,12 +130,14 @@ def test_policy_apply_rollback():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         (td/".git").mkdir()
-        # apply structured
-        res = mod.apply_structured(td, "specialist_threshold", 5, "test", "evidence", "validated", "2.2")
+        orig = mod.load(td)
+        orig_ver = orig["version"]
+        # apply structured to new version
+        res = mod.apply_structured(td, "specialist_threshold", 5, "test", "evidence", "validated", "9.9")
         assert res.get("applied") == True, f"apply failed {res}"
         pol = mod.load(td)
         assert_eq(pol["specialist_threshold"], 5, "threshold should be 5")
-        assert_eq(pol["version"], "2.2")
+        assert_eq(pol["version"], "9.9")
         # invalid path
         res2 = mod.apply_structured(td, "nonexistent.path", 1, "r","e","validated")
         assert "error" in res2
@@ -140,15 +146,11 @@ def test_policy_apply_rollback():
         assert "error" in res3
         # safety block
         res4 = mod.apply_structured(td, "specialist_threshold", 1, "lower risk weaken security","e","validated")
-        # path valid but reason contains weaken — actually check blocks safety patterns containing weaken
-        # Our block checks change_desc, which includes path+value+reason, so if reason has weaken it blocks
-        # verify
-        # rollback
-        rb = mod.rollback(td, "2.1")
+        assert "error" in res4 or res4.get("blocked")
+        # rollback to original
+        rb = mod.rollback(td, orig_ver)
         assert rb.get("verified") or "rolled_back_to" in rb, f"rollback failed {rb}"
         pol2 = mod.load(td)
-        # after rollback, should have original value 3
-        # Note rollback restores snapshot of version 2.1 which had 3
         assert_eq(pol2["specialist_threshold"], 3, f"rollback should restore 3 got {pol2['specialist_threshold']}")
     print("PASS policy apply/rollback")
 

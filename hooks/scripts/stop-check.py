@@ -8,9 +8,9 @@ except:
 
 def run(cmd, cwd=None):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8, cwd=cwd)
+        r = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=3, cwd=cwd)
         return r.stdout.strip()
-    except:
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return ""
 
 cwd = os.getcwd()
@@ -24,10 +24,10 @@ for parent in [p] + list(p.parents):
 if not repo:
     print(json.dumps({"continue": True})); sys.exit(0)
 
-diff_stat = run("git diff --stat", cwd=repo)
-diff_cached = run("git diff --cached --stat", cwd=repo)
-changed = run("git diff --name-only", cwd=repo)
-diff_text = run("git diff", cwd=repo)
+diff_stat = run(["git","diff","--stat"], cwd=repo)
+diff_cached = run(["git","diff","--cached","--stat"], cwd=repo)
+changed = run(["git","diff","--name-only"], cwd=repo)
+diff_text = run(["git","diff"], cwd=repo)
 has_changes = bool(diff_stat or diff_cached)
 
 if not has_changes:

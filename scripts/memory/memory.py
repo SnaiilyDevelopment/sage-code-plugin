@@ -18,26 +18,37 @@ def normalize_conf(c: str) -> str:
     return ALIAS.get(c, c)
 
 def _atomic_write_json(path: Path, obj: dict):
+    # delegate to shared utils.atomic with lock
+    try:
+        from scripts.utils.atomic import atomic_write_json as _shared
+        _shared(path, obj)
+        return
+    except (ImportError, OSError): pass
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
             bak = path.with_suffix(path.suffix + ".bak")
             bak.write_text(path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-        except: pass
+        except (OSError, UnicodeError): pass
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="."+path.name+".tmp.")
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(json.dumps(obj, indent=2))
             f.flush()
             try: os.fsync(f.fileno())
-            except: pass
+            except (OSError, AttributeError): pass
         os.replace(tmp, str(path))
-    except:
+    except (OSError, IOError) as e:
         try: os.unlink(tmp)
-        except: pass
+        except (OSError, FileNotFoundError): pass
         raise
 
 def _atomic_write_text(path: Path, text: str):
+    try:
+        from scripts.utils.atomic import atomic_write as _shared_t
+        _shared_t(path, text)
+        return
+    except (ImportError, OSError): pass
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="."+path.name+".tmp.")
     try:
@@ -45,11 +56,11 @@ def _atomic_write_text(path: Path, text: str):
             f.write(text)
             f.flush()
             try: os.fsync(f.fileno())
-            except: pass
+            except (OSError, AttributeError): pass
         os.replace(tmp, str(path))
-    except:
+    except (OSError, IOError):
         try: os.unlink(tmp)
-        except: pass
+        except (OSError, FileNotFoundError): pass
         raise
 
 def resolve_path(repo: Path) -> Path:
@@ -87,12 +98,11 @@ def load(repo: Path) -> dict:
             if "ttl_days" not in it:
                 it["ttl_days"] = 90
         return data
-    except Exception as e:
-        # MEMORY_CORRUPTED: preserve corrupt file, try backup, report
+    except (json.JSONDecodeError, UnicodeError, OSError) as e:
         try:
             corrupt_copy = p.with_name(p.name + ".corrupt." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
             corrupt_copy.write_text(p.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-        except: pass
+        except (OSError, UnicodeError): pass
         bak = p.with_suffix(p.suffix + ".bak")
         if bak.exists():
             try:
@@ -101,8 +111,7 @@ def load(repo: Path) -> dict:
                 data["_corruption_detected"] = True
                 data["_corruption_error"] = str(e)[:300]
                 return data
-            except: pass
-        # return corrupted marker, not empty
+            except (json.JSONDecodeError, OSError, UnicodeError): pass
         return {"items": [], "version": 1, "policy_version": "2.0", "_corruption_detected": True, "_corruption_error": str(e)[:300], "_status": "MEMORY_CORRUPTED", "_corrupt_path": str(p)}
 
 def load_with_status(repo: Path) -> dict:

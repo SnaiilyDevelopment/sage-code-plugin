@@ -133,10 +133,30 @@ def main():
                 try:
                     prev = json.loads(line)
                     if prev.get("task_id") == entry["task_id"] and prev.get("command") == entry["command"]:
-                        # duplicate — append dedup marker but still log with count
                         entry["duplicate_of"] = prev.get("task_id")
-                except: pass
-    except: pass
+                except (json.JSONDecodeError, OSError, UnicodeError): pass
+            # failure-loop protection: count retries for same task_id
+            retry_count = sum(1 for l in lines if l.strip() and json.loads(l).get("task_id")==task_id) if lines else 0
+            if retry_count >= 2 and entry.get("retries",0) >= 2:
+                entry["failure_loop_warning"] = f"task {task_id} already has {retry_count} telemetry entries — failure loop protection: avoid repeated scout without new evidence"
+            # anomaly: repeated scout calls
+            scout_calls = sum(1 for l in lines if json.loads(l).get("preflight_model"))
+            if scout_calls >= 3:
+                entry["cost_anomaly"] = f"Expected scout calls 1, actual {scout_calls+1} — anomaly"
+    except (OSError, json.JSONDecodeError, UnicodeError, ValueError): pass
+    # idempotency by content hash (avoid duplicate same result)
+    try:
+        if out.exists():
+            import hashlib as _hl
+            h = _hl.sha256(json.dumps({k:v for k,v in entry.items() if k not in ("ts","task_id")}, sort_keys=True).encode()).hexdigest()[:12]
+            entry["content_hash"] = h
+            for line in out.read_text(encoding="utf-8", errors="ignore").splitlines()[-20:]:
+                try:
+                    prev = json.loads(line)
+                    if prev.get("content_hash")==h:
+                        entry["idempotent_skip"] = True
+                except (json.JSONDecodeError, OSError, UnicodeError): pass
+    except (OSError, ValueError, TypeError): pass
     # atomic append with file lock (Windows msvcrt, POSIX fcntl)
     try:
         with open(out, "a", encoding="utf-8") as f:

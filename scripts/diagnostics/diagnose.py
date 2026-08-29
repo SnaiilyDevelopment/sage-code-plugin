@@ -104,10 +104,20 @@ def diagnose(task: str, categories: str = "", files: str = "", risk: int = -1, r
     pol = _run(["python", str(Path(__file__).resolve().parents[1] / "policy/policy.py"), "--show", "--repo", str(repo_path)], timeout=5)
     out["diagnostics"]["policy"] = pol
 
-    # Determine SIMULATED vs REAL
     scout_info = scout or {}
-    is_sim = scout_info.get("simulated", False) if isinstance(scout_info, dict) else False
-    status_label = "SIMULATED" if is_sim else ("REAL" if scout_info.get("status")=="OK" else ("REFUSED_BUDGET_EXCEEDED" if scout_info.get("status")=="REFUSED_BUDGET_EXCEEDED" else "HEURISTIC/UNAVAILABLE"))
+    status_map = {"NO_PROVIDER":"NO_PROVIDER","HEURISTIC_ONLY":"HEURISTIC_ONLY","REAL_MODEL":"REAL_MODEL","FAILED":"FAILED","REFUSED_BUDGET_EXCEEDED":"REFUSED_BUDGET_EXCEEDED","SIMULATED":"SIMULATED_TEST","SIMULATED_TEST":"SIMULATED_TEST"}
+    raw_status = scout_info.get("status","") if isinstance(scout_info, dict) else ""
+    heuristic = scout_info.get("heuristic", False) if isinstance(scout_info, dict) else False
+    if raw_status in status_map:
+        status_label = status_map[raw_status]
+    elif heuristic:
+        status_label = "HEURISTIC"
+    elif scout_info.get("simulated"):
+        status_label = "SIMULATED_TEST"
+    elif raw_status=="OK":
+        status_label = "REAL_MODEL"
+    else:
+        status_label = raw_status or "NO_PROVIDER" if not scout_info else "HEURISTIC/UNAVAILABLE"
 
     pre_info = out["diagnostics"].get("preflight",{})
     scout = pre_info.get("scout") if isinstance(pre_info, dict) else None
@@ -146,9 +156,8 @@ def diagnose(task: str, categories: str = "", files: str = "", risk: int = -1, r
         "Memory changes": f"{out['diagnostics'].get('memory',{}).get('items',0)} items @ {out['diagnostics'].get('memory',{}).get('path','')} [{out['diagnostics'].get('memory',{}).get('status','')}]",
         "Policy version": out["diagnostics"].get("policy",{}).get("version","?"),
     }
-    # Add explicit SIMULATED warning if needed
-    if is_sim:
-        out["answers"]["_warning"] = "Scout was SIMULATED (no API key) — cost/latency are heuristic, not real. Set SAGE_PREFLIGHT_API_KEY/GLM_API_KEY for real test."
+    if status_label in ("SIMULATED_TEST","NO_PROVIDER","HEURISTIC"):
+        out["answers"]["_warning"] = "Scout was heuristic/NO_PROVIDER (no API key) — not REAL_MODEL. Set SAGE_PREFLIGHT_API_KEY/GLM_API_KEY for real test."
     return out
 
 if __name__ == "__main__":
