@@ -11,8 +11,24 @@ SCORES = {
     "web": [r"current.*web|web.*current", r"external.*service", r"security.*advisory", r"\bbrowser\b", r"stripe.*api|supabase.*current"],
 }
 
+def _sanitize_for_mcp(text: str) -> str:
+    """Apply same secret firewall to MCP-bound content — never send unnecessary repo content."""
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        sp = _P(__file__).resolve().parents[1] / "safety" / "secret-strip.py"
+        spec = _ilu.spec_from_file_location("ss_mcp", str(sp))
+        m = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.strip(text)
+    except:
+        return text
+
 def select(task: str, categories: list) -> dict:
-    text = (task + " " + " ".join(categories)).lower()
+    # Priority: repo → project docs → installed docs → MCP docs → web (only if unavailable locally)
+    # Do not call MCP just because it exists; score 0-10 threshold 5
+    task_sanitized = _sanitize_for_mcp(task)
+    text = (task_sanitized + " " + " ".join(categories)).lower()
     scores = {}
     for server, pats in SCORES.items():
         s = 0
@@ -41,6 +57,8 @@ def select(task: str, categories: list) -> dict:
         "recommendation": recommendation,
         "safety": safety,
         "preference_order": "repository > project docs > installed docs > MCP docs > web",
+        "sanitized": task_sanitized != task,
+        "note": "MCP content passes through secret firewall; never send unnecessary repository content"
     }
 
 if __name__ == "__main__":

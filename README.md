@@ -1,4 +1,4 @@
-# Sage Code — v2.1.0
+# Sage Code — v2.4.0
 
 A SageTweaks-focused Claude Code engineering layer with **cheap pre-flight intelligence** — Sage understands cheap vs expensive reasoning.
 

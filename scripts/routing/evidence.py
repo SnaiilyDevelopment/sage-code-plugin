@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 STATUSES = ["VERIFIED","STRONG_EVIDENCE","OBSERVATION","HYPOTHESIS","UNKNOWN"]
 BUDGET_TOKENS = 800
+BUDGET_TARGET = 600
+BUDGET_HARD = 900
 INJECTION_PATTERNS = [r"ignore\s+previous\s+instructions", r"disable\s+security", r"run\s+this\s+command", r"upload\s+secrets", r"change\s+the\s+policy", r"ignore\s+safety\s+rules"]
 
 def estimate_tokens(obj) -> int:
@@ -43,6 +45,10 @@ def _check_fabricated(files: list, repo: Path) -> list:
     return out
 
 def build_pack(task: str, scout_result: dict, relevant_files: list = None, budget: int = BUDGET_TOKENS, repo: str = ".", research_sources: list = None) -> dict:
+    # Enforce hard limit 900, target 600 per token economics
+    if budget > BUDGET_HARD:
+        budget = BUDGET_HARD
+    # if no explicit budget, use default 800 but warn if over hard
     # validate scout_result schema
     if not isinstance(scout_result, dict):
         scout_result = {"findings": [], "model": "unknown", "error": "malformed scout_result"}

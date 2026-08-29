@@ -57,6 +57,10 @@ def _load_policy_budget(repo: Path) -> int:
     except:
         return 6000
 
+COMPLEXITY_BUDGETS = {"simple": 1500, "medium": 6000, "complex": 12000}
+SCOUT_TARGET = 600
+SCOUT_HARD = 900
+
 def build(task: str, categories: list[str], files: list[str], skill_hint: str = "", tool_output: str = "", prior_state: str = "", budget_tokens: int = None, repo: Path = None) -> dict:
     repo = repo or Path.cwd()
     # single policy load, cached
@@ -65,6 +69,22 @@ def build(task: str, categories: list[str], files: list[str], skill_hint: str = 
         budget_tokens = policy_budget
     if budget_tokens > policy_budget:
         budget_tokens = policy_budget
+    # Enforce complexity-based budgets if caller passes no explicit budget: clamp to complexity hint
+    # If task looks simple, enforce ≤1500 regardless of policy
+    try:
+        from pathlib import Path as _P2
+        import importlib.util as _ilu2
+        cp = _P2(__file__).parent / "classify.py"
+        spec = _ilu2.spec_from_file_location("cls_bud", str(cp))
+        cm = _ilu2.module_from_spec(spec)
+        spec.loader.exec_module(cm)
+        cls = cm.classify(task, files)
+        comp = cls.get("complexity","medium")
+        max_for_comp = COMPLEXITY_BUDGETS.get(comp, policy_budget)
+        if budget_tokens > max_for_comp:
+            budget_tokens = max_for_comp
+    except:
+        pass
     # also load skill budget once
     try:
         import importlib.util as _ilu
@@ -192,7 +212,7 @@ def build(task: str, categories: list[str], files: list[str], skill_hint: str = 
         layers["5_tool_output"] = "(none yet)"
         # negligible, don't charge
 
-    # L6 validated memory — capped
+    # L6 validated memory — capped with ROI filtering (relevance×confidence×freshness/token_cost)
     try:
         import importlib.util
         mem_path = plugin_root / "scripts" / "memory" / "memory.py"
@@ -205,8 +225,27 @@ def build(task: str, categories: list[str], files: list[str], skill_hint: str = 
             mem_items.extend(get_mem(repo, cat))
         if not mem_items:
             mem_items = get_mem(repo, "")
-        mem_items = [x for x in mem_items if not x.get("_stale")][:3]
+        mem_items = [x for x in mem_items if not x.get("_stale")]
+        # ROI filter: prioritize high-ROI memory
+        try:
+            from pathlib import Path as _P3
+            import importlib.util as _ilu3
+            rp = _P3(__file__).parent / "roi.py"
+            spec3 = _ilu3.spec_from_file_location("roi", str(rp))
+            roi_mod = _ilu3.module_from_spec(spec3)
+            spec3.loader.exec_module(roi_mod)
+            ranked = roi_mod.filter_by_roi([{"text": x["fact"], "confidence": x.get("confidence","observed"), "date": x.get("last_validated") or x.get("date")} for x in mem_items], task, threshold=0.0005, top_n=3)
+            # map back to original items ordered by ROI
+            ordered = []
+            for r in ranked:
+                txt = r["item"]["text"] if isinstance(r.get("item"), dict) else str(r.get("item"))
+                match = next((x for x in mem_items if x["fact"]==txt), None)
+                if match: ordered.append(match)
+            mem_items = ordered if ordered else mem_items[:3]
+        except Exception:
+            mem_items = mem_items[:3]
         if mem_items:
+            mem_items = mem_items[:3]
             mem_str = "; ".join([f"{x['fact']} ({x['source']}, {x['confidence']})" for x in mem_items])
             remaining = tracker.remaining()
             if remaining <= 100:
@@ -222,7 +261,7 @@ def build(task: str, categories: list[str], files: list[str], skill_hint: str = 
                 else:
                     layers["6_validated_memory"] = "(omitted — budget exhausted)"
                     tracker.layers.append({"layer":"6_validated_memory","priority":6,"requested":est,"estimated":est,"accepted":False,"remaining_after":remaining})
-            layers["6_memory_source"] = ".wolf/sage-memory.json (provenance required; stale marked)"
+            layers["6_memory_source"] = ".wolf/sage-memory.json (provenance required; stale marked; ROI filtered)"
         else:
             layers["6_validated_memory"] = "(no relevant durable memory)"
     except Exception as e:

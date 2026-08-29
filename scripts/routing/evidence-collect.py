@@ -10,9 +10,35 @@ SYMBOL_PATTERNS = [
 ]
 INJECTION_RE = re.compile(r"^\s*(ignore\s+previous|system\s*:|assistant\s*:|jailbreak|disable\s+security|run\s+this\s+command|upload\s+secrets|change\s+the\s+policy)", re.I)
 
+def _strip_secrets(text: str) -> str:
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        sp = _P(__file__).resolve().parents[1] / "safety" / "secret-strip.py"
+        spec = _ilu.spec_from_file_location("secret_strip", str(sp))
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.strip(text)
+    except Exception:
+        return text
+
+def _is_dangerous_file(path_str: str) -> bool:
+    try:
+        import importlib.util as _ilu2
+        from pathlib import Path as _P2
+        sp = _P2(__file__).resolve().parents[1] / "safety" / "secret-strip.py"
+        spec = _ilu2.spec_from_file_location("secret_strip2", str(sp))
+        mod = _ilu2.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.is_dangerous_filename(path_str)
+    except Exception:
+        return False
+
 def _safe_read(fp: Path, max_chars=800) -> str:
     try:
         txt = fp.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+        # Layered protection: strip secrets before returning
+        txt = _strip_secrets(txt)
         # sanitize prompt injection: prefix untrusted lines
         lines = []
         for line in txt.splitlines()[:60]:
@@ -74,14 +100,19 @@ def collect(task: str, categories: list, files: list, repo: Path, max_chars: int
     # Stage 1: locate relevant symbols/files
     located = []  # list of {file, line, symbol}
 
-    # 1) directly referenced files (validate path)
+    # 1) directly referenced files (validate path) — Layer 1 filename scan
     for fp in list(dict.fromkeys(files or []))[:6]:
+        if _is_dangerous_file(fp):
+            parts.append(f"[BLOCKED sensitive file not sent to scout: {fp[:80]}]")
+            continue
         if not _validate_path(repo, fp):
             parts.append(f"[BLOCKED path traversal: {fp[:80]}]")
             continue
         p = repo / fp
         if p.exists() and p.is_file():
             snippet = _safe_read(p, 900)
+            # Layer 2: scan snippet for residual secrets (already stripped but verify)
+            snippet = _strip_secrets(snippet)
             parts.append(f"<untrusted_evidence source=\"{fp}\">\n{snippet}\n</untrusted_evidence>")
             seen.add(fp)
             # also locate symbols in that file
@@ -106,10 +137,14 @@ def collect(task: str, categories: list, files: list, repo: Path, max_chars: int
                 located.append(h)
                 try:
                     fp = repo / h["file"]
+                    if _is_dangerous_file(h["file"]):
+                        parts.append(f"[BLOCKED sensitive file hit: {h['file'][:80]}]")
+                        continue
                     if _validate_path(repo, h["file"]) and fp.exists():
                         lines = fp.read_text(encoding="utf-8", errors="ignore").splitlines()
                         ln = int(h["line"])
                         ctx = "\n".join(lines[max(0,ln-3):ln+3])
+                        ctx = _strip_secrets(ctx)
                         ctx = "\n".join([f"> {l[:140]}" if INJECTION_RE.match(l) else l[:140] for l in ctx.splitlines()])
                         parts.append(f"<untrusted_evidence source=\"{h['file']}:{h['line']}\" symbol=\"{kw}\">\n{ctx[:500]}\n</untrusted_evidence>")
                 except (OSError, ValueError, IndexError): pass
@@ -164,7 +199,10 @@ def collect(task: str, categories: list, files: list, repo: Path, max_chars: int
         parts.append(f"<untrusted_evidence kind=\"categories\">{', '.join(categories[:6])}</untrusted_evidence>")
 
     out = "\n---\n".join(parts)
+    # Layer 7: hard outbound payload size + final secret sweep
+    out = _strip_secrets(out)
     # Bounded: truncate to max_chars but keep tag integrity (cut at boundary)
     if len(out) > max_chars:
         out = out[:max_chars].rsplit("\n", 1)[0] + "\n[truncated evidence]"
+    # Ensure payload respects 6-step firewall logging (only safe metadata already)
     return out
