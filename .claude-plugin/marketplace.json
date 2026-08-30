@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "sage-code-marketplace",
+  "version": "1.0.0",
+  "description": "Sage Code — a SageTweaks-focused Claude Code engineering layer with intelligent routing, risk controls, deterministic verification, adaptive preflight, and usage-efficient workflows.",
+  "owner": {
+    "name": "SageTweaks",
+    "email": ""
+  },
+  "plugins": [
+    {
+      "name": "sage-code",
+      "description": "SageTweaks-focused Claude Code engineering layer for Windows, Tauri, Rust, performance, security, deterministic verification, and cost-efficient preflight intelligence.",
+      "version": "2.4.0",
+      "author": {
+        "name": "SageTweaks"
+      },
+      "source": ".",
+      "category": "development"
+    }
+  ]
+}
